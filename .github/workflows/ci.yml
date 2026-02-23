@@ -1,56 +1,92 @@
-name: CI (tests backend)
+name: CI
 
 on:
   push:
     branches:
-      - "**"
+      - '**'
 
 jobs:
-  test-backend:
+  test:
+    name: Build & Test
     runs-on: ubuntu-latest
 
     defaults:
       run:
         working-directory: todo-java
+        
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: todo_user
+          POSTGRES_PASSWORD: todo_pass
+          POSTGRES_DB: todo_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_NAME: todo_db
+      DB_USER: todo_user
+      DB_PASSWORD: todo_pass
+      PORT: 8080
 
     steps:
-      - name: Checkout
+      - name: Checkout código
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Configurar Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: "17"
+          java-version: '17'
+          distribution: 'temurin'
 
-      - name: Instalar dependencias (librerías)
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x scripts/download-libs.sh
-          bash scripts/download-libs.sh
-          ls -la lib
+      - name: Descargar dependencias (JARs)
+        run: bash scripts/download-libs.sh
 
-      - name: Compilar MAIN
-        shell: bash
+      - name: Compilar código principal
         run: |
-          set -euo pipefail
           mkdir -p out/main
           find src/main/java -name "*.java" > sources.txt
           javac -cp "lib/*" -d out/main @sources.txt
 
-      - name: Compilar TESTS
-        shell: bash
+      - name: Compilar tests
         run: |
-          set -euo pipefail
           mkdir -p out/test
           find src/test/java -name "*.java" > test-sources.txt
           javac -cp "lib/*:out/main" -d out/test @test-sources.txt
 
-      - name: Ejecutar TESTS (JUnit Console)
-        shell: bash
+      - name: Arrancar la app en background
         run: |
-          set -euo pipefail
+          java -cp "lib/*:out/main" App &
+          echo $! > app.pid
+
+      - name: Esperar a que la app esté lista
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:8080/api/health/; then
+              echo "App lista"
+              exit 0
+            fi
+            echo "Intento $i - esperando..."
+            sleep 2
+          done
+          echo "La app no respondió a tiempo"
+          exit 1
+
+      - name: Ejecutar tests
+        run: |
           java -jar lib/junit-platform-console-standalone-1.10.3.jar \
-            -cp "lib/*:out/main:out/test" \
-            --scan-classpath
+            --class-path "lib/*:out/main:out/test" \
+            --scan-class-path \
+            --fail-if-no-tests
+
+      - name: Detener la app
+        if: always()
+        run: kill $(cat app.pid) || true
